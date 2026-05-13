@@ -1,6 +1,6 @@
 {
   "log": {
-    "access": "none",
+    "access": "/var/log/x-ui/access.log",
     "dnsLog": false,
     "error": "",
     "loglevel": "warning",
