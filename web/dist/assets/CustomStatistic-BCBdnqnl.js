@@ -1,0 +1,2 @@
+import{t as e}from"./_plugin-vue_export-helper-DsZbMPkK.js";import{W as t,at as n,ot as r,rt as i,ut as a}from"./vendor-antd-Bjg4RfSm.js";var o=e({__name:`CustomStatistic`,props:{title:{type:String,default:``},value:{type:[String,Number],default:``}},setup(e){return(o,s)=>{let c=r(`a-statistic`);return i(),t(c,{title:e.title,value:e.value},{prefix:a(()=>[n(o.$slots,`prefix`,{},void 0,!0)]),suffix:a(()=>[n(o.$slots,`suffix`,{},void 0,!0)]),_:3},8,[`title`,`value`])}}},[[`__scopeId`,`data-v-76d6fe19`]]);export{o as t};
+//# sourceMappingURL=CustomStatistic-BCBdnqnl.js.map
