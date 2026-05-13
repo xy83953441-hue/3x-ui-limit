@@ -4,24 +4,15 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - "**"
+      - main
+      - master
     tags:
       - "v*.*.*"
-    paths:
-      - "**.js"
-      - "**.css"
-      - "**.html"
-      - "**.sh"
-      - "**.go"
-      - "go.mod"
-      - "go.sum"
-      - "x-ui.service.debian"
-      - "x-ui.service.arch"
-      - "x-ui.service.rhel"
   pull_request:
 
 jobs:
   build:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     strategy:
@@ -45,10 +36,6 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
-      # Frontend dist must be built BEFORE go build — Go's //go:embed
-      # all:dist directive in web/web.go requires web/dist/ to exist
-      # at compile time. web/dist/ is .gitignored, so on a fresh CI
-      # checkout it doesn't exist until vite emits it.
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -67,7 +54,6 @@ jobs:
           export CGO_ENABLED=1
           export GOOS=linux
           export GOARCH=${{ matrix.platform }}
-          # Use Bootlin prebuilt cross-toolchains (musl 1.2.5 in stable series)
           case "${{ matrix.platform }}" in
             amd64) BOOTLIN_ARCH="x86-64" ;;
             arm64) BOOTLIN_ARCH="aarch64" ;;
@@ -87,8 +73,12 @@ jobs:
           tar -xf "$(basename "$TARBALL_URL")"
           TOOLCHAIN_DIR=$(find . -maxdepth 1 -type d -name "${BOOTLIN_ARCH}--musl--stable-*" | head -n1)
           export PATH="$(realpath "$TOOLCHAIN_DIR")/bin:$PATH"
-          export CC=$(realpath "$(find "$TOOLCHAIN_DIR/bin" -name '*-gcc.br_real' -type f -executable | head -n1)")
-          [ -z "$CC" ] && { echo "No gcc.br_real found in $TOOLCHAIN_DIR/bin" >&2; exit 1; }
+          export CC=$(realpath "$(find "$TOOLCHAIN_DIR/bin" -name '*-gcc.br_real' -type f -executable | head -n1)" 2>/dev/null)
+          # Fallback: look for any gcc in the toolchain
+          if [ -z "$CC" ]; then
+            CC=$(realpath "$(find "$TOOLCHAIN_DIR/bin" -name '*-gcc' -type f -executable | head -n1)")
+          fi
+          [ -z "$CC" ] && { echo "No gcc found in $TOOLCHAIN_DIR/bin" >&2; exit 1; }
           cd -
           go build -ldflags "-w -s -linkmode external -extldflags '-static'" -o xui-release -v main.go
           file xui-release
@@ -96,46 +86,39 @@ jobs:
 
           mkdir x-ui
           cp xui-release x-ui/
-          cp x-ui.service.debian x-ui/
-          cp x-ui.service.arch x-ui/
-          cp x-ui.service.rhel x-ui/
+          # Copy service files if they exist
+          cp x-ui.service.debian x-ui/ 2>/dev/null || true
+          cp x-ui.service.arch x-ui/ 2>/dev/null || true
+          cp x-ui.service.rhel x-ui/ 2>/dev/null || true
           cp x-ui.sh x-ui/
           mv x-ui/xui-release x-ui/x-ui
           mkdir x-ui/bin
           cd x-ui/bin
 
-          # Download dependencies
           Xray_URL="https://github.com/XTLS/Xray-core/releases/download/v26.4.25/"
           if [ "${{ matrix.platform }}" == "amd64" ]; then
             wget -q ${Xray_URL}Xray-linux-64.zip
             unzip Xray-linux-64.zip
-            rm -f Xray-linux-64.zip
           elif [ "${{ matrix.platform }}" == "arm64" ]; then
             wget -q ${Xray_URL}Xray-linux-arm64-v8a.zip
             unzip Xray-linux-arm64-v8a.zip
-            rm -f Xray-linux-arm64-v8a.zip
           elif [ "${{ matrix.platform }}" == "armv7" ]; then
             wget -q ${Xray_URL}Xray-linux-arm32-v7a.zip
             unzip Xray-linux-arm32-v7a.zip
-            rm -f Xray-linux-arm32-v7a.zip
           elif [ "${{ matrix.platform }}" == "armv6" ]; then
             wget -q ${Xray_URL}Xray-linux-arm32-v6.zip
             unzip Xray-linux-arm32-v6.zip
-            rm -f Xray-linux-arm32-v6.zip
           elif [ "${{ matrix.platform }}" == "386" ]; then
             wget -q ${Xray_URL}Xray-linux-32.zip
             unzip Xray-linux-32.zip
-            rm -f Xray-linux-32.zip
           elif [ "${{ matrix.platform }}" == "armv5" ]; then
             wget -q ${Xray_URL}Xray-linux-arm32-v5.zip
             unzip Xray-linux-arm32-v5.zip
-            rm -f Xray-linux-arm32-v5.zip
           elif [ "${{ matrix.platform }}" == "s390x" ]; then
             wget -q ${Xray_URL}Xray-linux-s390x.zip
             unzip Xray-linux-s390x.zip
-            rm -f Xray-linux-s390x.zip
           fi
-          rm -f geoip.dat geosite.dat
+          rm -f Xray-*.zip geoip.dat geosite.dat
           wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
           wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
           wget -q -O geoip_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat
@@ -156,7 +139,7 @@ jobs:
 
       - name: Upload files to GH release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
@@ -164,12 +147,36 @@ jobs:
           asset_name: x-ui-linux-${{ matrix.platform }}.tar.gz
           overwrite: true
           prerelease: true
+          # If pushing to main/master without a tag, auto-create or update the "latest" release
+          release_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+
+  # Auto-tag main/master pushes so install.sh can find a stable release
+  auto-tag:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.mktag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Create auto tag
+        id: mktag
+        run: |
+          TAG="build-$(date +%Y%m%d)-${{ github.run_number }}"
+          # Delete existing tag with same name if it exists (from a previous run)
+          git tag -d "$TAG" 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # =================================
   #  Windows Build
   # =================================
   build-windows:
     name: Build for Windows
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     strategy:
@@ -187,9 +194,6 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
-      # Frontend dist must be built BEFORE go build — see comment on the
-      # Linux job above. This step is identical except npm runs on the
-      # Windows runner here.
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -218,16 +222,13 @@ jobs:
         shell: msys2 {0}
         run: |
           export PATH="/c/hostedtoolcache/windows/go/$(ls /c/hostedtoolcache/windows/go | sort -V | tail -n1)/x64/bin:$PATH"
-
           export CGO_ENABLED=1
           export GOOS=windows
           export GOARCH=amd64
           export CC=x86_64-w64-mingw32-gcc
-
           which go
           go version
           gcc --version
-
           go build -ldflags "-w -s" -o xui-release.exe -v main.go
 
       - name: Copy and download resources
@@ -237,8 +238,6 @@ jobs:
           Copy-Item xui-release.exe x-ui\x-ui.exe
           mkdir x-ui\bin
           cd x-ui\bin
-
-          # Download Xray for Windows
           $Xray_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.4.25/"
           Invoke-WebRequest -Uri "${Xray_URL}Xray-windows-64.zip" -OutFile "Xray-windows-64.zip"
           Expand-Archive -Path "Xray-windows-64.zip" -DestinationPath .
@@ -252,7 +251,7 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat" -OutFile "geosite_RU.dat"
           Rename-Item xray.exe xray-windows-amd64.exe
           cd ..
-          Copy-Item -Path ..\windows_files\* -Destination . -Recurse
+          Copy-Item -Path ..\windows_files\* -Destination . -Recurse -ErrorAction SilentlyContinue
           cd ..
 
       - name: Package to Zip
@@ -268,7 +267,7 @@ jobs:
 
       - name: Upload files to GH release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
@@ -276,3 +275,4 @@ jobs:
           asset_name: x-ui-windows-amd64.zip
           overwrite: true
           prerelease: true
+          release_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
