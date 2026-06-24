@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # The Go binary embeds web/dist/ via //go:embed all:dist (web/web.go).
       # web/dist/ is .gitignored, so CodeQL's autobuild for Go will fail with
