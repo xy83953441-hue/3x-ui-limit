@@ -60,17 +60,76 @@ is_domain() {
 is_port_in_use() {
     local port="$1"
     if command -v ss > /dev/null 2>&1; then
-        ss -ltn 2> /dev/null | awk -v p=":${port}$" '$4 ~ p {exit 0} END {exit 1}'
+        ss -ltn 2> /dev/null | awk -v p=":${port}$" '$4 ~ p {found=1} END {exit !found}'
         return
     fi
     if command -v netstat > /dev/null 2>&1; then
-        netstat -lnt 2> /dev/null | awk -v p=":${port} " '$4 ~ p {exit 0} END {exit 1}'
+        netstat -lnt 2> /dev/null | awk -v p=":${port}$" '$4 ~ p {found=1} END {exit !found}'
         return
     fi
     if command -v lsof > /dev/null 2>&1; then
         lsof -nP -iTCP:${port} -sTCP:LISTEN > /dev/null 2>&1 && return 0
     fi
     return 1
+}
+
+
+# Keep renewal ports open without disabling the firewall or reloading other rules.
+open_ssl_port() {
+    local port="$1" iface zone
+    [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || return 1
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        iface=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+        if [[ -z "$iface" ]]; then
+            echo "无法确定公网网卡，请手动放行 TCP $port。" >&2
+            return 1
+        fi
+        zone=$(firewall-cmd --get-zone-of-interface="$iface" 2>/dev/null)
+        [[ -n "$zone" && "$zone" != "no zone" ]] || zone=$(firewall-cmd --get-default-zone)
+        firewall-cmd --zone="$zone" --add-port="$port/tcp" &&
+            firewall-cmd --permanent --zone="$zone" --add-port="$port/tcp" || return 1
+        echo "已在 firewalld 区域 $zone 放行 TCP $port（含永久规则）。"
+    elif command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; then
+        ufw allow "$port/tcp" || return 1
+    else
+        echo "未检测到运行中的 firewalld/UFW，请确认其他防火墙允许 TCP $port。"
+    fi
+    echo "云平台安全组也需允许 TCP $port；本机规则不能保证公网可达。"
+}
+
+ensure_renewal_service() {
+    if [[ "$release" == "alpine" ]]; then
+        rc-update add crond default && rc-service crond start
+    else
+        local service
+        case "$release" in
+            ubuntu|debian|armbian|opensuse-*) service=cron ;;
+            *) service=crond ;;
+        esac
+        systemctl enable --now "$service" && systemctl is-active --quiet "$service"
+    fi
+}
+
+# Verify files and matching keys before configuring TLS. Never log private keys.
+valid_certificate_pair() {
+    local cert="$1" key="$2" cert_pub key_pub
+    [[ -s "$cert" && -s "$key" ]] || return 1
+    openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 || return 1
+    cert_pub=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null) || return 1
+    key_pub=$(openssl pkey -in "$key" -pubout 2>/dev/null) || return 1
+    [[ -n "$cert_pub" && "$cert_pub" == "$key_pub" ]]
+}
+
+# Derive the displayed scheme from configured, usable files, never from a menu choice.
+refresh_ssl_scheme() {
+    local settings cert key
+    SSL_SCHEME="http"
+    settings=$("${xui_folder}/x-ui" setting -getCert true) || return 1
+    cert=$(printf '%s\n' "$settings" | sed -n 's/^cert: *//p')
+    key=$(printf '%s\n' "$settings" | sed -n 's/^key: *//p')
+    if valid_certificate_pair "$cert" "$key"; then
+        SSL_SCHEME="https"
+    fi
 }
 
 install_base() {
@@ -111,16 +170,18 @@ gen_random_string() {
 }
 
 install_acme() {
-    echo -e "${green}Installing acme.sh for SSL certificate management...${plain}"
-    cd ~ || return 1
-    curl -s https://get.acme.sh | sh > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo -e "${red}Failed to install acme.sh${plain}"
+    local installer
+    installer=$(mktemp) || return 1
+    echo "正在安装 acme.sh..."
+    if ! curl -fLsS --connect-timeout 15 --max-time 120 https://get.acme.sh -o "$installer"; then
+        rm -f "$installer"
         return 1
-    else
-        echo -e "${green}acme.sh installed successfully${plain}"
     fi
-    return 0
+    # Use a subshell: changing the installer's working directory breaks later extraction.
+    (cd /root && sh "$installer")
+    local result=$?
+    rm -f "$installer"
+    [[ $result -eq 0 && -x /root/.acme.sh/acme.sh ]]
 }
 
 setup_ssl_certificate() {
@@ -193,153 +254,61 @@ setup_ssl_certificate() {
 # Issue Let's Encrypt IP certificate with shortlived profile (~6 days validity)
 # Requires acme.sh and port 80 open for HTTP-01 challenge
 setup_ip_certificate() {
-    local ipv4="$1"
-    local ipv6="$2" # optional
-
-    echo -e "${green}Setting up Let's Encrypt IP certificate (shortlived profile)...${plain}"
-    echo -e "${yellow}Note: IP certificates are valid for ~6 days and will auto-renew.${plain}"
-    echo -e "${yellow}Default listener is port 80. If you choose another port, ensure external port 80 forwards to it.${plain}"
-
-    # Check for acme.sh
-    if ! command -v ~/.acme.sh/acme.sh &> /dev/null; then
-        install_acme
-        if [ $? -ne 0 ]; then
-            echo -e "${red}Failed to install acme.sh${plain}"
-            return 1
-        fi
+    local ipv4="$1" ipv6="${2:-}" issue_status
+    local acme="/root/.acme.sh/acme.sh"
+    local certDir="/root/cert/ip" log="/var/log/x-ui/acme-ip.log"
+    local -a domains=(-d "$ipv4")
+    is_ipv4 "$ipv4" || { echo "无效 IPv4 地址：$ipv4"; return 1; }
+    if [[ -n "$ipv6" ]]; then
+        is_ipv6 "$ipv6" || return 1
+        domains+=(-d "$ipv6")
     fi
-
-    # Validate IP address
-    if [[ -z "$ipv4" ]]; then
-        echo -e "${red}IPv4 address is required${plain}"
+    # The default automatic path uses public TCP 80 end-to-end.
+    if ! command -v ss >/dev/null && ! command -v netstat >/dev/null && ! command -v lsof >/dev/null; then
+        echo "无法检查端口占用，请安装 ss、netstat 或 lsof 后重试。" >&2
         return 1
     fi
-
-    if ! is_ipv4 "$ipv4"; then
-        echo -e "${red}Invalid IPv4 address: $ipv4${plain}"
+    if is_port_in_use 80; then
+        echo "TCP 80 已被占用，未停止现有服务。请使用域名/webroot 方式，或释放端口后重试。" >&2
         return 1
     fi
-
-    # Create certificate directory
-    local certDir="/root/cert/ip"
-    mkdir -p "$certDir"
-
-    # Build domain arguments
-    local domain_args="-d ${ipv4}"
-    if [[ -n "$ipv6" ]] && is_ipv6 "$ipv6"; then
-        domain_args="${domain_args} -d ${ipv6}"
-        echo -e "${green}Including IPv6 address: ${ipv6}${plain}"
+    command -v socat >/dev/null || { echo "缺少 socat，无法启动证书验证服务。"; return 1; }
+    ensure_renewal_service || { echo "自动续期所需的 cron 服务无法启动，停止申请。"; return 1; }
+    open_ssl_port 80 || return 1
+    [[ -x "$acme" ]] || install_acme || return 1
+    if ! "$acme" --help | grep -q -- '--certificate-profile'; then
+        "$acme" --upgrade || return 1
+        "$acme" --help | grep -q -- '--certificate-profile' || return 1
     fi
+    "$acme" --install-cronjob || return 1
+    crontab -l 2>/dev/null | grep -F 'acme.sh' | grep -q -- '--cron' ||
+        { echo "未找到 acme.sh 自动续期任务，停止申请。"; return 1; }
+    mkdir -p "$certDir" /var/log/x-ui || return 1
+    touch "$log" && chmod 600 "$log" || return 1
 
-    # Set reload command for auto-renewal (add || true so it doesn't fail during first install)
-    local reloadCmd="systemctl restart x-ui 2>/dev/null || rc-service x-ui restart 2>/dev/null || true"
-
-    # Choose port for HTTP-01 listener (default 80, prompt override)
-    local WebPort=""
-    read -rp "Port to use for ACME HTTP-01 listener (default 80): " WebPort
-    WebPort="${WebPort:-80}"
-    if ! [[ "${WebPort}" =~ ^[0-9]+$ ]] || ((WebPort < 1 || WebPort > 65535)); then
-        echo -e "${red}Invalid port provided. Falling back to 80.${plain}"
-        WebPort=80
-    fi
-    echo -e "${green}Using port ${WebPort} for standalone validation.${plain}"
-    if [[ "${WebPort}" -ne 80 ]]; then
-        echo -e "${yellow}Reminder: Let's Encrypt still connects on port 80; forward external port 80 to ${WebPort}.${plain}"
-    fi
-
-    # Ensure chosen port is available
-    while true; do
-        if is_port_in_use "${WebPort}"; then
-            echo -e "${yellow}Port ${WebPort} is in use.${plain}"
-
-            local alt_port=""
-            read -rp "Enter another port for acme.sh standalone listener (leave empty to abort): " alt_port
-            alt_port="${alt_port// /}"
-            if [[ -z "${alt_port}" ]]; then
-                echo -e "${red}Port ${WebPort} is busy; cannot proceed.${plain}"
-                return 1
-            fi
-            if ! [[ "${alt_port}" =~ ^[0-9]+$ ]] || ((alt_port < 1 || alt_port > 65535)); then
-                echo -e "${red}Invalid port provided.${plain}"
-                return 1
-            fi
-            WebPort="${alt_port}"
-            continue
-        else
-            echo -e "${green}Port ${WebPort} is free and ready for standalone validation.${plain}"
-            break
-        fi
-    done
-
-    # Issue certificate with shortlived profile
-    echo -e "${green}Issuing IP certificate for ${ipv4}...${plain}"
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt --force > /dev/null 2>&1
-
-    ~/.acme.sh/acme.sh --issue \
-        ${domain_args} \
-        --standalone \
-        --server letsencrypt \
-        --certificate-profile shortlived \
-        --days 6 \
-        --httpport ${WebPort} \
-        --force
-
-    if [ $? -ne 0 ]; then
-        echo -e "${red}Failed to issue IP certificate${plain}"
-        echo -e "${yellow}Please ensure port ${WebPort} is reachable (or forwarded from external port 80)${plain}"
-        # Cleanup acme.sh data for both IPv4 and IPv6 if specified
-        rm -rf ~/.acme.sh/${ipv4} 2> /dev/null
-        [[ -n "$ipv6" ]] && rm -rf ~/.acme.sh/${ipv6} 2> /dev/null
-        rm -rf ${certDir} 2> /dev/null
+    echo "正在自动申请 IP 证书；有效期约 6 天，设置每 3 天续期。"
+    "$acme" --issue "${domains[@]}" --standalone --server letsencrypt \
+        --certificate-profile shortlived --keylength ec-256 --days 3 --httpport 80 --log "$log"
+    issue_status=$?
+    # acme.sh returns 2 when an existing certificate is not yet due for renewal.
+    if [[ $issue_status -ne 0 && $issue_status -ne 2 ]]; then
+        echo "证书申请失败，详细日志：$log"
+        echo "请检查云平台 TCP 80 放行、IP 公网可达性、验证服务和 CA 返回的错误。"
+        echo "已保留原有证书及 ACME 账户，不会显示虚假的 HTTPS 成功提示。"
         return 1
     fi
-
-    echo -e "${green}Certificate issued successfully, installing...${plain}"
-
-    # Install certificate
-    # Note: acme.sh may report "Reload error" and exit non-zero if reloadcmd fails,
-    # but the cert files are still installed. We check for files instead of exit code.
-    ~/.acme.sh/acme.sh --installcert -d ${ipv4} \
-        --key-file "${certDir}/privkey.pem" \
-        --fullchain-file "${certDir}/fullchain.pem" \
-        --reloadcmd "${reloadCmd}" 2>&1 || true
-
-    # Verify certificate files exist (don't rely on exit code - reloadcmd failure causes non-zero)
-    if [[ ! -f "${certDir}/fullchain.pem" || ! -f "${certDir}/privkey.pem" ]]; then
-        echo -e "${red}Certificate files not found after installation${plain}"
-        # Cleanup acme.sh data for both IPv4 and IPv6 if specified
-        rm -rf ~/.acme.sh/${ipv4} 2> /dev/null
-        [[ -n "$ipv6" ]] && rm -rf ~/.acme.sh/${ipv6} 2> /dev/null
-        rm -rf ${certDir} 2> /dev/null
-        return 1
-    fi
-
-    echo -e "${green}Certificate files installed successfully${plain}"
-
-    # Enable auto-upgrade for acme.sh (ensures cron job runs)
-    ~/.acme.sh/acme.sh --upgrade --auto-upgrade > /dev/null 2>&1
-
-    # Secure permissions: private key readable only by owner
-    chmod 600 ${certDir}/privkey.pem 2> /dev/null
-    chmod 644 ${certDir}/fullchain.pem 2> /dev/null
-
-    # Configure panel to use the certificate
-    echo -e "${green}Setting certificate paths for the panel...${plain}"
-    ${xui_folder}/x-ui cert -webCert "${certDir}/fullchain.pem" -webCertKey "${certDir}/privkey.pem"
-
-    if [ $? -ne 0 ]; then
-        echo -e "${yellow}Warning: Could not set certificate paths automatically${plain}"
-        echo -e "${yellow}Certificate files are at:${plain}"
-        echo -e "  Cert: ${certDir}/fullchain.pem"
-        echo -e "  Key:  ${certDir}/privkey.pem"
-    else
-        echo -e "${green}Certificate paths configured successfully${plain}"
-    fi
-
-    echo -e "${green}IP certificate installed and configured successfully!${plain}"
-    echo -e "${green}Certificate valid for ~6 days, auto-renews via acme.sh cron job.${plain}"
-    echo -e "${yellow}acme.sh will automatically renew and reload x-ui before expiry.${plain}"
-    return 0
+    # Skip restarting only on first install; renewal must report real restart errors.
+    local reloadCmd='if command -v systemctl >/dev/null 2>&1 && systemctl cat x-ui.service >/dev/null 2>&1; then systemctl restart x-ui; elif [ -x /etc/init.d/x-ui ]; then rc-service x-ui restart; fi'
+    "$acme" --install-cert -d "$ipv4" --ecc \
+        --key-file "$certDir/privkey.pem" --fullchain-file "$certDir/fullchain.pem" \
+        --reloadcmd "$reloadCmd" --log "$log" || return 1
+    valid_certificate_pair "$certDir/fullchain.pem" "$certDir/privkey.pem" ||
+        { echo "证书无效、过期或与私钥不匹配，未启用 HTTPS。"; return 1; }
+    chmod 600 "$certDir/privkey.pem" || return 1
+    chmod 644 "$certDir/fullchain.pem" || return 1
+    "${xui_folder}/x-ui" cert -webCert "$certDir/fullchain.pem" -webCertKey "$certDir/privkey.pem" ||
+        { echo "证书已签发，但写入面板配置失败。"; return 1; }
+    echo "IP 证书已配置，自动续期任务已检查。请保持公网 TCP 80 可达。"
 }
 
 # Comprehensive manual SSL certificate issuance via acme.sh
@@ -532,13 +501,15 @@ prompt_and_setup_ssl() {
     local server_ip="$3"
 
     local ssl_choice=""
-    SSL_SCHEME="https"
+    SSL_SCHEME="http"
+    SSL_HOST="${server_ip}"
 
     echo -e "${yellow}Choose SSL certificate setup method:${plain}"
     echo -e "${green}1.${plain} Let's Encrypt for Domain (90-day validity, auto-renews)"
     echo -e "${green}2.${plain} Let's Encrypt for IP Address (6-day validity, auto-renews)"
     echo -e "${green}3.${plain} Custom SSL Certificate (Path to existing files)"
     echo -e "${green}4.${plain} Skip SSL (advanced — behind reverse proxy / SSH tunnel only)"
+    echo "IP 自动申请会放行本机 TCP 80，并在 HTTPS 配置成功后放行面板端口，保留规则供续期使用。"
     echo -e "${blue}Note:${plain} Options 1 & 2 require port 80 open. Option 3 requires manual paths."
     echo -e "${blue}Note:${plain} Option 4 serves the panel over plain HTTP — only safe behind nginx/Caddy or an SSH tunnel."
     read -rp "Choose an option (default 2 for IP): " ssl_choice
@@ -587,12 +558,11 @@ prompt_and_setup_ssl() {
                 systemctl stop x-ui > /dev/null 2>&1
             fi
 
-            setup_ip_certificate "${server_ip}" "${ipv6_addr}"
-            if [ $? -eq 0 ]; then
+            if setup_ip_certificate "${server_ip}" "${ipv6_addr}"; then
                 SSL_HOST="${server_ip}"
                 echo -e "${green}✓ Let's Encrypt IP certificate configured successfully${plain}"
             else
-                echo -e "${red}✗ IP certificate setup failed. Please check port 80 is open.${plain}"
+                echo -e "${red}IP 证书自动配置失败，请根据上面的具体错误和日志排查。${plain}"
                 SSL_HOST="${server_ip}"
             fi
             ;;
@@ -696,6 +666,12 @@ prompt_and_setup_ssl() {
             SSL_HOST="${server_ip}"
             ;;
     esac
+    refresh_ssl_scheme
+    if [[ "$SSL_SCHEME" == "https" && "$ssl_choice" != "4" ]]; then
+        open_ssl_port "$panel_port" || echo "证书已配置，但面板端口放行失败，请手动检查 TCP $panel_port。"
+    elif [[ "$SSL_SCHEME" != "https" ]]; then
+        echo "当前未配置可用 HTTPS 证书，面板仍使用 HTTP；请通过 SSH 隧道管理。"
+    fi
 }
 
 config_after_install() {
@@ -1014,7 +990,14 @@ install_x-ui() {
         fi
     fi
 
-    echo -e "${green}x-ui ${tag_version}${plain} installation finished, it is running now..."
+    # systemctl start may succeed before the process exits; verify service state.
+    sleep 2
+    if [[ "$release" == "alpine" ]]; then
+        rc-service x-ui status >/dev/null 2>&1 || { echo "面板启动失败，请检查 x-ui 日志。"; return 1; }
+    else
+        systemctl is-active --quiet x-ui || { echo "面板启动失败，请执行 journalctl -u x-ui -n 50 --no-pager。"; return 1; }
+    fi
+    echo -e "${green}x-ui ${tag_version}${plain} 安装完成，服务正在运行。证书状态请以上方实际结果为准。"
     echo -e ""
     echo -e "┌───────────────────────────────────────────────────────┐
 │  ${blue}x-ui control menu usages (subcommands):${plain}              │
@@ -1037,5 +1020,5 @@ install_x-ui() {
 }
 
 echo -e "${green}Running...${plain}"
-install_base
-install_x-ui $1
+install_base || { echo "基础依赖安装失败，停止安装。"; exit 1; }
+install_x-ui "$@"
