@@ -103,7 +103,7 @@ confirm_restart() {
 }
 
 before_show_menu() {
-    echo && echo -n -e "${yellow}Press enter to return to the main menu: ${plain}" && read -r temp
+    echo && echo -n -e "${yellow}按回车键返回主菜单：${plain}" && read -r temp
     show_menu
 }
 
@@ -719,15 +719,15 @@ show_status() {
     check_status
     case $? in
         0)
-            echo -e "Panel state: ${green}Running${plain}"
+            echo -e "面板状态：${green}运行中${plain}"
             show_enable_status
             ;;
         1)
-            echo -e "Panel state: ${yellow}Not Running${plain}"
+            echo -e "面板状态：${yellow}未运行${plain}"
             show_enable_status
             ;;
         2)
-            echo -e "Panel state: ${red}Not Installed${plain}"
+            echo -e "面板状态：${red}未安装${plain}"
             ;;
     esac
     show_xray_status
@@ -736,9 +736,9 @@ show_status() {
 show_enable_status() {
     check_enabled
     if [[ $? == 0 ]]; then
-        echo -e "Start automatically: ${green}Yes${plain}"
+        echo -e "开机自启：${green}已启用${plain}"
     else
-        echo -e "Start automatically: ${red}No${plain}"
+        echo -e "开机自启：${red}已关闭${plain}"
     fi
 }
 
@@ -754,9 +754,9 @@ check_xray_status() {
 show_xray_status() {
     check_xray_status
     if [[ $? == 0 ]]; then
-        echo -e "xray state: ${green}Running${plain}"
+        echo -e "Xray 状态：${green}运行中${plain}"
     else
-        echo -e "xray state: ${red}Not Running${plain}"
+        echo -e "Xray 状态：${red}未运行${plain}"
     fi
 }
 
@@ -2275,44 +2275,44 @@ show_usage() {
 show_menu() {
     echo -e "
 ╔────────────────────────────────────────────────╗
-│   ${green}3X-UI Panel Management Script${plain}                │
-│   ${green}0.${plain} Exit Script                               │
+│   ${green}3X-UI 面板管理脚本${plain}                           │
+│   ${green}0.${plain} 退出脚本                                  │
 │────────────────────────────────────────────────│
-│   ${green}1.${plain} Install                                   │
-│   ${green}2.${plain} Update                                    │
-│   ${green}3.${plain} Update Menu                               │
-│   ${green}4.${plain} Legacy Version                            │
-│   ${green}5.${plain} Uninstall                                 │
+│   ${green}1.${plain} 安装面板                                  │
+│   ${green}2.${plain} 更新面板                                  │
+│   ${green}3.${plain} 更新管理菜单                              │
+│   ${green}4.${plain} 安装指定历史版本                          │
+│   ${green}5.${plain} 卸载面板                                  │
 │────────────────────────────────────────────────│
-│   ${green}6.${plain} Reset Username & Password                 │
-│   ${green}7.${plain} Reset Web Base Path                       │
-│   ${green}8.${plain} Reset Settings                            │
-│   ${green}9.${plain} Change Port                               │
-│  ${green}10.${plain} View Current Settings                     │
+│   ${green}6.${plain} 重置用户名和密码                          │
+│   ${green}7.${plain} 重置面板访问路径                          │
+│   ${green}8.${plain} 重置面板设置                              │
+│   ${green}9.${plain} 修改面板端口                              │
+│  ${green}10.${plain} 查看当前设置                              │
 │────────────────────────────────────────────────│
-│  ${green}11.${plain} Start                                     │
-│  ${green}12.${plain} Stop                                      │
-│  ${green}13.${plain} Restart                                   │
-|  ${green}14.${plain} Restart Xray                              │
-│  ${green}15.${plain} Check Status                              │
-│  ${green}16.${plain} Logs Management                           │
+│  ${green}11.${plain} 启动面板                                  │
+│  ${green}12.${plain} 停止面板                                  │
+│  ${green}13.${plain} 重启面板                                  │
+│  ${green}14.${plain} 重启 Xray                                 │
+│  ${green}15.${plain} 查看运行状态                              │
+│  ${green}16.${plain} 日志管理                                  │
 │────────────────────────────────────────────────│
-│  ${green}17.${plain} Enable Autostart                          │
-│  ${green}18.${plain} Disable Autostart                         │
+│  ${green}17.${plain} 启用开机自启                              │
+│  ${green}18.${plain} 关闭开机自启                              │
 │────────────────────────────────────────────────│
-│  ${green}19.${plain} SSL Certificate Management                │
-│  ${green}20.${plain} Cloudflare SSL Certificate                │
-│  ${green}21.${plain} IP Limit Management                       │
-│  ${green}22.${plain} Firewall Management                       │
-│  ${green}23.${plain} SSH Port Forwarding Management            │
+│  ${green}19.${plain} SSL 证书管理                              │
+│  ${green}20.${plain} Cloudflare SSL 证书                       │
+│  ${green}21.${plain} IP 限制管理                               │
+│  ${green}22.${plain} 防火墙管理                                │
+│  ${green}23.${plain} SSH 端口转发管理                          │
 │────────────────────────────────────────────────│
-│  ${green}24.${plain} Enable BBR                                │
-│  ${green}25.${plain} Update Geo Files                          │
-│  ${green}26.${plain} Speedtest by Ookla                        │
+│  ${green}24.${plain} 启用 BBR                                  │
+│  ${green}25.${plain} 更新 Geo 数据文件                         │
+│  ${green}26.${plain} Ookla 网络测速                            │
 ╚────────────────────────────────────────────────╝
 "
     show_status
-    echo && read -rp "Please enter your selection [0-26]: " num
+    echo && read -rp "请输入选项编号 [0-26]：" num
 
     case "${num}" in
         0)
@@ -2397,7 +2397,7 @@ show_menu() {
             run_speedtest
             ;;
         *)
-            LOGE "Please enter the correct number [0-26]"
+            LOGE "请输入正确的编号 [0-26]"
             ;;
     esac
 }
