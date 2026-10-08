@@ -33,6 +33,8 @@ export function useInbounds() {
     subURI: '',
     subJsonURI: '',
     subJsonEnable: false,
+    subClashURI: '',
+    subClashEnable: false,
   });
   const remarkModel = ref('-ieo');
   const datepicker = ref('gregorian');
@@ -143,6 +145,8 @@ export function useInbounds() {
       subURI: s.subURI || '',
       subJsonURI: s.subJsonURI || '',
       subJsonEnable: !!s.subJsonEnable,
+      subClashURI: s.subClashURI || '',
+      subClashEnable: !!s.subClashEnable,
     };
     pageSize.value = s.pageSize ?? 0;
     remarkModel.value = s.remarkModel || '-ieo';
