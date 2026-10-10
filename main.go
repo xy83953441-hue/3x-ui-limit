@@ -3,8 +3,11 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
+	"github.com/mhsanaei/3x-ui/v3/database/model"
+	"gorm.io/gorm"
 	"log"
 	"os"
 	"os/signal"
@@ -174,6 +177,7 @@ func showSetting(show bool) {
 		userModel, err := userService.GetFirstUser()
 		if err != nil {
 			fmt.Println("get current user info failed, error info:", err)
+			return
 		}
 
 		if userModel.Username == "" || userModel.Password == "" {
@@ -194,6 +198,18 @@ func showSetting(show bool) {
 		fmt.Println("hasDefaultCredential:", hasDefaultCredential)
 		fmt.Println("port:", port)
 		fmt.Println("webBasePath:", webBasePath)
+		if subPort, err := settingService.GetSubPort(); err == nil {
+			fmt.Println("subPort:", subPort)
+		}
+		if subEnable, err := settingService.GetSubEnable(); err == nil {
+			fmt.Println("subEnable:", subEnable)
+		}
+		if clashEnable, err := settingService.GetSubClashEnable(); err == nil {
+			fmt.Println("subClashEnable:", clashEnable)
+		}
+		if clashPath, err := settingService.GetSubClashPath(); err == nil {
+			fmt.Println("subClashPath:", clashPath)
+		}
 	}
 }
 
@@ -257,6 +273,9 @@ func updateTgbotSetting(tgBotToken string, tgBotChatid string, tgBotRuntime stri
 
 // updateSetting updates various panel settings including port, credentials, base path, listen IP, and two-factor authentication.
 func updateSetting(port int, username string, password string, webBasePath string, listenIP string, resetTwoFactor bool) error {
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("端口必须在 1—65535 之间")
+	}
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println("Database initialization failed:", err)
@@ -270,6 +289,7 @@ func updateSetting(port int, username string, password string, webBasePath strin
 		err := settingService.SetPort(port)
 		if err != nil {
 			fmt.Println("Failed to set port:", err)
+			return err
 		} else {
 			fmt.Printf("Port set successfully: %v\n", port)
 		}
@@ -279,6 +299,7 @@ func updateSetting(port int, username string, password string, webBasePath strin
 		err := userService.UpdateFirstUser(username, password)
 		if err != nil {
 			fmt.Println("Failed to update username and password:", err)
+			return err
 		} else {
 			fmt.Println("Username and password updated successfully")
 		}
@@ -288,6 +309,7 @@ func updateSetting(port int, username string, password string, webBasePath strin
 		err := settingService.SetBasePath(webBasePath)
 		if err != nil {
 			fmt.Println("Failed to set base URI path:", err)
+			return err
 		} else {
 			fmt.Println("Base URI path set successfully")
 		}
@@ -298,8 +320,11 @@ func updateSetting(port int, username string, password string, webBasePath strin
 
 		if err != nil {
 			fmt.Println("Failed to reset two-factor authentication:", err)
+			return err
 		} else {
-			settingService.SetTwoFactorToken("")
+			if err := settingService.SetTwoFactorToken(""); err != nil {
+				return err
+			}
 			fmt.Println("Two-factor authentication reset successfully")
 		}
 	}
@@ -308,6 +333,7 @@ func updateSetting(port int, username string, password string, webBasePath strin
 		err := settingService.SetListen(listenIP)
 		if err != nil {
 			fmt.Println("Failed to set listen IP:", err)
+			return err
 		} else {
 			fmt.Printf("listen %v set successfully", listenIP)
 		}
@@ -317,45 +343,38 @@ func updateSetting(port int, username string, password string, webBasePath strin
 }
 
 // updateCert updates the SSL certificate files for the panel.
-func updateCert(publicKey string, privateKey string) {
-	err := database.InitDB(config.GetDBPath())
-	if err != nil {
-		fmt.Println(err)
-		return
+func updateCert(publicKey string, privateKey string) error {
+	if (publicKey == "") != (privateKey == "") {
+		return fmt.Errorf("证书和私钥必须同时提供")
 	}
-
-	if (privateKey != "" && publicKey != "") || (privateKey == "" && publicKey == "") {
-		settingService := service.SettingService{}
-		err = settingService.SetCertFile(publicKey)
-		if err != nil {
-			fmt.Println("set certificate public key failed:", err)
-		} else {
-			fmt.Println("set certificate public key success")
+	if publicKey != "" {
+		if _, err := tls.LoadX509KeyPair(publicKey, privateKey); err != nil {
+			return fmt.Errorf("证书与私钥无效: %w", err)
 		}
-
-		err = settingService.SetKeyFile(privateKey)
-		if err != nil {
-			fmt.Println("set certificate private key failed:", err)
-		} else {
-			fmt.Println("set certificate private key success")
-		}
-
-		err = settingService.SetSubCertFile(publicKey)
-		if err != nil {
-			fmt.Println("set certificate for subscription public key failed:", err)
-		} else {
-			fmt.Println("set certificate for subscription public key success")
-		}
-
-		err = settingService.SetSubKeyFile(privateKey)
-		if err != nil {
-			fmt.Println("set certificate for subscription private key failed:", err)
-		} else {
-			fmt.Println("set certificate for subscription private key success")
-		}
-	} else {
-		fmt.Println("both public and private key should be entered.")
 	}
+	if err := database.InitDB(config.GetDBPath()); err != nil {
+		return err
+	}
+	return saveCertificateSettings(database.GetDB(), publicKey, privateKey)
+}
+
+func saveCertificateSettings(db *gorm.DB, publicKey, privateKey string) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		for key, value := range map[string]string{
+			"webCertFile": publicKey, "webKeyFile": privateKey,
+			"subCertFile": publicKey, "subKeyFile": privateKey,
+		} {
+			var setting model.Setting
+			if err := tx.Where("key = ?", key).Assign(model.Setting{Key: key, Value: value}).FirstOrCreate(&setting).Error; err != nil {
+				return err
+			}
+			// Assign a map so empty values also clear existing settings.
+			if err := tx.Model(&setting).Update("value", value).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // GetCertificate displays the current SSL certificate settings if getCert is true.
@@ -485,11 +504,13 @@ func main() {
 		}
 		if reset {
 			if err = resetSetting(); err != nil {
-				return
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
 			}
 		} else {
 			if err = updateSetting(port, username, password, webBasePath, listenIP, resetTwoFactor); err != nil {
-				return
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
 			}
 		}
 		if show {
@@ -514,10 +535,15 @@ func main() {
 			return
 		}
 		if reset {
-			updateCert("", "")
+			err = updateCert("", "")
 		} else {
-			updateCert(webCertFile, webKeyFile)
+			err = updateCert(webCertFile, webKeyFile)
 		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("面板与订阅证书配置已保存")
 	default:
 		fmt.Println("Invalid subcommands")
 		fmt.Println()

@@ -10,10 +10,34 @@ on:
       - "v*.*.*"
   pull_request:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: npm ci && npm run build
+        working-directory: frontend
+      - run: node tests/inbound_validation_test.mjs
+      - run: go test ./...
+      - run: bash tests/install_ssl_test.sh && bash tests/operations_test.sh
+      - run: python3 scripts/sync_ssl.py --check
+
   # Determine the release tag: on main push, generate a unique build tag;
   # on tag push, use the tag itself.
   resolve-tag:
+    needs: [validate]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
@@ -28,11 +52,13 @@ jobs:
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
             TAG="v0.0.1-build-${{ github.run_number }}"
-            # Delete existing tag if re-running
-            git tag -d "$TAG" 2>/dev/null || true
-            git push origin ":refs/tags/$TAG" 2>/dev/null || true
-            git tag "$TAG"
-            git push origin "$TAG"
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+              test "$(git rev-list -n1 "$TAG")" = "$GITHUB_SHA"
+            else
+              git tag "$TAG"
+              git push origin "$TAG"
+            fi
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
 
@@ -115,6 +141,8 @@ jobs:
           cp x-ui.service.arch x-ui/ 2>/dev/null || true
           cp x-ui.service.rhel x-ui/ 2>/dev/null || true
           cp x-ui.sh x-ui/
+          cp -r scripts x-ui/
+          cp x-ui.rc x-ui/
           mv x-ui/xui-release x-ui/x-ui
           mkdir x-ui/bin
           cd x-ui/bin
@@ -161,15 +189,6 @@ jobs:
           name: x-ui-linux-${{ matrix.platform }}
           path: ./x-ui-linux-${{ matrix.platform }}.tar.gz
 
-      - name: Upload files to GH release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ needs.resolve-tag.outputs.release_tag }}
-          file: x-ui-linux-${{ matrix.platform }}.tar.gz
-          asset_name: x-ui-linux-${{ matrix.platform }}.tar.gz
-          overwrite: true
-          prerelease: false
 
   # =================================
   #  Windows Build
@@ -266,12 +285,39 @@ jobs:
           name: x-ui-windows-amd64
           path: ./x-ui-windows-amd64.zip
 
-      - name: Upload files to GH release
-        uses: svenstaro/upload-release-action@v2
+
+  publish:
+    needs: [resolve-tag, build, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ needs.resolve-tag.outputs.release_tag }}
-          file: x-ui-windows-amd64.zip
-          asset_name: x-ui-windows-amd64.zip
-          overwrite: true
-          prerelease: false
+          pattern: x-ui-*
+          merge-multiple: true
+          path: release
+      - name: Verify every package and publish together
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve-tag.outputs.release_tag }}
+        working-directory: release
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64 armv7 armv6 386 armv5 s390x; do
+            test -s "x-ui-linux-$arch.tar.gz"
+            tar -tzf "x-ui-linux-$arch.tar.gz" >/dev/null
+          done
+          unzip -t x-ui-windows-amd64.zip >/dev/null
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true || {
+              echo 'An existing published release is immutable; use a new tag.'; exit 1;
+            }
+          else
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --notes '安装、证书、诊断和更新可靠性优化。'
+          fi
+          gh release upload "$TAG" *.tar.gz *.zip SHA256SUMS --clobber
+          test "$(gh release view "$TAG" --json assets --jq '.assets | length')" = 9
+          gh release edit "$TAG" --draft=false --latest

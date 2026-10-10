@@ -111,7 +111,8 @@ pass 'occupied TCP 80 aborts before changing services or requesting certificate'
     setup_ip_certificate() { return 1; }
     refresh_ssl_scheme() { SSL_SCHEME=http; }
     open_ssl_port() { echo 'unexpected open' > "$tmp/unexpected"; }
-    prompt_and_setup_ssl 7241 path 203.0.113.1 <<< $'2\n\n'
+    SSL_SCHEME=http
+    ! prompt_and_setup_ssl 7241 path 203.0.113.1 <<< $'2\n\n'
     [[ "$SSL_SCHEME" == http && ! -e "$tmp/unexpected" ]]
 )
 pass 'failed IP setup neither announces HTTPS nor opens panel port'

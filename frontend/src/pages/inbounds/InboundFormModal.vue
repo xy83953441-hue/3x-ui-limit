@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import dayjs from 'dayjs';
+import { validateInbound } from '@/utils/validateInbound.js';
 import { message } from 'ant-design-vue';
 import { SyncOutlined, PlusOutlined, MinusOutlined, DeleteOutlined } from '@ant-design/icons-vue';
 
@@ -485,6 +486,9 @@ async function submit() {
       settings = JSON.stringify(JSON.parse(advancedJson.value.settings || inbound.value.settings.toString()));
     } catch (e) { message.error(`Settings JSON invalid: ${e.message}`); return; }
 
+    const validationError = validateInbound(inbound.value.port, JSON.parse(streamSettings || '{}'), JSON.parse(settings || '{}'));
+    if (validationError) { message.error(validationError); return; }
+
     // The structured form mutates `inbound.stream` directly when the
     // user edits TCP/WS/gRPC/HTTPUpgrade fields, but if they touched
     // the Advanced JSON tab their edits live there. Keep the JSON tab
@@ -520,6 +524,7 @@ async function submit() {
       : '/panel/api/inbounds/add';
     const msg = await HttpUtil.post(url, payload);
     if (msg?.success) {
+      message.info('请确认服务器防火墙已放行此节点端口；可在服务器运行 x-ui open-node-port。');
       emit('saved');
       close();
     }
