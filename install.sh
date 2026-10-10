@@ -355,146 +355,58 @@ setup_cloudflare_certificate() (
 # END GENERATED SSL
 
 config_after_install() {
-    local existing_hasDefaultCredential=$(${xui_folder}/x-ui setting -show true | grep -Eo 'hasDefaultCredential: .+' | awk '{print $2}')
-    local existing_webBasePath=$(${xui_folder}/x-ui setting -show true | grep -Eo 'webBasePath: .+' | awk '{print $2}' | sed 's#^/##')
-    local existing_port=$(${xui_folder}/x-ui setting -show true | grep -Eo 'port: .+' | awk '{print $2}')
-    # Properly detect empty cert by checking if cert: line exists and has content after it
-    local existing_cert=$(${xui_folder}/x-ui setting -getCert true | grep 'cert:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
-    local URL_lists=(
-        "https://api4.ipify.org"
-        "https://ipv4.icanhazip.com"
-        "https://v4.api.ipinfo.io/ip"
-        "https://ipv4.myexternalip.com/raw"
-        "https://4.ident.me"
-        "https://check-host.net/ip"
-    )
-    local server_ip=""
-    for ip_address in "${URL_lists[@]}"; do
-        local response=$(curl -s -w "\n%{http_code}" --max-time 3 "${ip_address}" 2> /dev/null)
-        local http_code=$(echo "$response" | tail -n1)
-        local ip_result=$(echo "$response" | head -n-1 | tr -d '[:space:]"')
-        if [[ "${http_code}" == "200" && "${ip_result}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            server_ip="${ip_result}"
-            break
-        fi
+    local info old_default port path username='' password='' answer server_ip=''
+    info=$("$xui_folder/x-ui" setting -show true) || return 1
+    old_default=$(printf '%s\n' "$info" | sed -n 's/^hasDefaultCredential: *//p')
+    port=$(printf '%s\n' "$info" | sed -n 's/^port: *//p')
+    path=$(printf '%s\n' "$info" | sed -n 's/^webBasePath: *//p')
+    if [[ "$old_default" == true ]]; then
+        username=$(gen_random_string 12)
+        password=$(gen_random_string 20)
+        [[ ${#username} == 12 && ${#password} == 20 ]] || return 1
+        read -rp '面板 TCP 端口（留空随机选择）：' port
+        [[ -n "$port" ]] || port=$(shuf -i 1024-62000 -n 1)
+        [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || { echo '端口无效。'; return 1; }
+        if is_port_in_use "$port"; then echo '面板端口已被其他服务占用。'; return 1; fi
+        "$xui_folder/x-ui" setting -username "$username" -password "$password" -port "$port" || return 1
+    fi
+    if [[ ${#path} -lt 4 ]]; then
+        path=$(gen_random_string 18)
+        [[ ${#path} == 18 ]] || return 1
+        "$xui_folder/x-ui" setting -webBasePath "$path" || return 1
+    fi
+    for endpoint in https://api.ipify.org https://ipv4.icanhazip.com; do
+        server_ip=$(curl -4fLsS --connect-timeout 3 --max-time 6 "$endpoint" 2>/dev/null)
+        is_ipv4 "$server_ip" && break
+        server_ip=''
     done
-
-    if [[ -z "$server_ip" ]]; then
-        echo -e "${yellow}Could not auto-detect server IP from any provider.${plain}"
-        while [[ -z "$server_ip" ]]; do
-            read -rp "Please enter your server's public IPv4 address: " server_ip
-            server_ip="${server_ip// /}"
-            if [[ ! "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                echo -e "${red}Invalid IPv4 address. Please try again.${plain}"
-                server_ip=""
-            fi
-        done
-    fi
-
-    if [[ ${#existing_webBasePath} -lt 4 ]]; then
-        if [[ "$existing_hasDefaultCredential" == "true" ]]; then
-            local config_webBasePath=$(gen_random_string 18)
-            local config_username=$(gen_random_string 10)
-            local config_password=$(gen_random_string 10)
-
-            read -rp "Would you like to customize the Panel Port settings? (If not, a random port will be applied) [y/n]: " config_confirm
-            if [[ "${config_confirm}" == "y" || "${config_confirm}" == "Y" ]]; then
-                read -rp "Please set up the panel port: " config_port
-                echo -e "${yellow}Your Panel Port is: ${config_port}${plain}"
-            else
-                local config_port=$(shuf -i 1024-62000 -n 1)
-                echo -e "${yellow}Generated random port: ${config_port}${plain}"
-            fi
-
-            ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}" || return 1
-
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     SSL 证书设置（推荐）   ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}SSL is strongly recommended. Skip only if a reverse proxy${plain}"
-            echo -e "${yellow}or SSH tunnel handles TLS for you.${plain}"
-            echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-            echo ""
-
-            SSL_SCHEME=http
-            prompt_and_setup_ssl "${config_port}" "${config_webBasePath}" "${server_ip}" || echo "证书配置未完成，请查看上方错误。"
-            refresh_ssl_scheme
-
-            # Display final credentials and access information
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     面板初始化信息         ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}账号：    ${config_username}${plain}"
-            echo -e "${green}密码：    ${config_password}${plain}"
-            echo -e "${green}面板端口：  ${config_port}${plain}"
-            echo -e "${green}访问路径： ${config_webBasePath}${plain}"
-            echo -e "${green}访问地址：  ${SSL_SCHEME}://${SSL_HOST}:${config_port}/${config_webBasePath}${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}⚠ 请妥善保存账号密码！${plain}"
-            if [[ "$SSL_SCHEME" == "https" ]]; then
-                echo -e "${yellow}⚠ SSL Certificate: Enabled and configured${plain}"
-            else
-                echo -e "${yellow}⚠ SSL Certificate: Skipped — panel is HTTP-only. Use a reverse proxy or SSH tunnel.${plain}"
-            fi
-        else
-            local config_webBasePath=$(gen_random_string 18)
-            echo -e "${yellow}WebBasePath is missing or too short. Generating a new one...${plain}"
-            ${xui_folder}/x-ui setting -webBasePath "${config_webBasePath}"
-            echo -e "${green}New 访问路径： ${config_webBasePath}${plain}"
-
-            # If the panel is already installed but no certificate is configured, prompt for SSL now
-            if [[ -z "${existing_cert}" ]]; then
-                echo ""
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${green}     SSL 证书设置（推荐）   ${plain}"
-                echo -e "${green}═══════════════════════════════════════════${plain}"
-                echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-                echo ""
-                SSL_SCHEME=http
-            prompt_and_setup_ssl "${existing_port}" "${config_webBasePath}" "${server_ip}"
-                echo -e "${green}访问地址：  ${SSL_SCHEME}://${SSL_HOST}:${existing_port}/${config_webBasePath}${plain}"
-            else
-                # If a cert already exists, just show the access URL
-                echo -e "${green}访问地址： https://${server_ip}:${existing_port}/${config_webBasePath}${plain}"
-            fi
-        fi
+    while ! is_ipv4 "$server_ip"; do
+        read -rp '请输入服务器公网 IPv4 地址：' server_ip || return 1
+    done
+    SSL_HOST="$server_ip"
+    refresh_ssl_scheme || return 1
+    if [[ "$SSL_SCHEME" != https ]]; then
+        prompt_and_setup_ssl "$port" "$path" "$server_ip" || echo '证书配置未完成，请按上方错误排查。'
     else
-        if [[ "$existing_hasDefaultCredential" == "true" ]]; then
-            local config_username=$(gen_random_string 10)
-            local config_password=$(gen_random_string 10)
-
-            echo -e "${yellow}Default credentials detected. Security update required...${plain}"
-            ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}"
-            echo -e "Generated new random login credentials:"
-            echo -e "###############################################"
-            echo -e "${green}账号： ${config_username}${plain}"
-            echo -e "${green}密码： ${config_password}${plain}"
-            echo -e "###############################################"
-        else
-            echo -e "${green}已保留原有账号、密码和访问路径；忘记密码可在菜单 6 重置。${plain}"
-        fi
-
-        # Existing install: if no cert configured, prompt user for SSL setup
-        # Properly detect empty cert by checking if cert: line exists and has content after it
-        existing_cert=$(${xui_folder}/x-ui setting -getCert true | grep 'cert:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
-        if [[ -z "$existing_cert" ]]; then
-            echo ""
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}     SSL 证书设置（推荐）   ${plain}"
-            echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${yellow}Let's Encrypt now supports both domains and IP addresses!${plain}"
-            echo ""
-            SSL_SCHEME=http
-            prompt_and_setup_ssl "${existing_port}" "${existing_webBasePath}" "${server_ip}"
-            echo -e "${green}访问地址：  ${SSL_SCHEME}://${SSL_HOST}:${existing_port}/${existing_webBasePath}${plain}"
-        else
-            echo -e "${green}SSL certificate already configured. No action needed.${plain}"
-        fi
+        echo '已有有效证书，已保留。访问时应使用该证书对应的域名或 IP。'
     fi
-
-    ${xui_folder}/x-ui migrate
+    refresh_ssl_scheme || return 1
+    echo '========== 面板初始化结果 =========='
+    if [[ -n "$username" ]]; then
+        echo "账号：$username"
+        echo "密码：$password"
+        echo '请妥善保存；菜单 6 可以重置账号密码。'
+    else
+        echo '账号密码：保留原设置；忘记时使用菜单 6 重置。'
+    fi
+    echo "面板端口：$port"
+    echo "访问路径：/${path#/}"
+    echo "访问地址：$SSL_SCHEME://$SSL_HOST:$port/${path#/}"
+    echo "证书状态：$SSL_SCHEME（服务启动后生效）"
+    info=$("$xui_folder/x-ui" setting -show true) || return 1
+    echo "订阅端口：$(printf '%s\n' "$info" | sed -n 's/^subPort: *//p')"
+    echo 'FlClash：复制二维码窗口中的 Clash / FlClash 订阅。'
+    echo '本机和云平台均需放行对应端口；菜单 27 可查看防火墙及续期状态。'
 }
 
 install_x-ui() {

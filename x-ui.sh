@@ -277,7 +277,8 @@ set_port() {
         LOGD "已取消"
         before_show_menu
     else
-        ${xui_folder}/x-ui setting -port ${port}
+        [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || { echo "端口无效。"; return 1; }
+        "${xui_folder}/x-ui" setting -port "$port" || return 1
         echo -e "端口已保存，请重启面板，然后使用新端口 ${green}${port}${plain} 访问面板"
         confirm_restart
     fi

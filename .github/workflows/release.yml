@@ -31,7 +31,7 @@ jobs:
         working-directory: frontend
       - run: node tests/inbound_validation_test.mjs
       - run: go test ./...
-      - run: bash tests/install_ssl_test.sh && bash tests/operations_test.sh
+      - run: bash tests/install_ssl_test.sh && bash tests/operations_test.sh && bash tests/install_summary_test.sh
       - run: python3 scripts/sync_ssl.py --check
 
   # Determine the release tag: on main push, generate a unique build tag;

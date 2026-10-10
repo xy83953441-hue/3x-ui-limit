@@ -6,8 +6,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"github.com/mhsanaei/3x-ui/v3/database/model"
-	"gorm.io/gorm"
 	"log"
 	"os"
 	"os/signal"
@@ -16,6 +14,7 @@ import (
 
 	"github.com/mhsanaei/3x-ui/v3/config"
 	"github.com/mhsanaei/3x-ui/v3/database"
+	"github.com/mhsanaei/3x-ui/v3/database/model"
 	"github.com/mhsanaei/3x-ui/v3/logger"
 	"github.com/mhsanaei/3x-ui/v3/sub"
 	"github.com/mhsanaei/3x-ui/v3/util/crypto"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/op/go-logging"
+	"gorm.io/gorm"
 )
 
 // runWebServer initializes and starts the web server for the 3x-ui panel.
