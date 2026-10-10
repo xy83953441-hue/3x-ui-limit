@@ -107,30 +107,35 @@ before_show_menu() {
     show_menu
 }
 
-install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/xy83953441-hue/3x-ui-limit/main/install.sh)
-    if [[ $? == 0 ]]; then
-        if [[ $# == 0 ]]; then
-            start
-        else
-            start 0
-        fi
+run_remote_script() {
+    local name="$1" tmp result
+    [[ "$name" == install || "$name" == update ]] || return 1
+    tmp=$(mktemp) || return 1
+    if ! curl -fLsS --connect-timeout 15 --max-time 120 "https://raw.githubusercontent.com/xy83953441-hue/3x-ui-limit/main/$name.sh" -o "$tmp" ||
+        [[ ! -s "$tmp" ]] || ! bash -n "$tmp"; then
+        rm -f "$tmp"
+        echo '脚本下载或检查失败，未执行任何安装/更新操作。'
+        return 1
     fi
+    bash "$tmp"
+    result=$?
+    rm -f "$tmp"
+    return "$result"
+}
+
+install() {
+    run_remote_script install
 }
 
 update() {
-    confirm "将下载校验安装包，备份后更新；启动失败会尝试恢复。是否继续？" "y"
-    if [[ $? != 0 ]]; then
-        LOGE "已取消"
-        if [[ $# == 0 ]]; then
-            before_show_menu
-        fi
+    confirm '将校验安装包并备份，启动失败会尝试恢复。是否继续？' y || return 0
+    if run_remote_script update; then
+        LOGI '更新完成，面板已重启。'
+        [[ $# == 0 ]] && before_show_menu
         return 0
-    fi
-    bash <(curl -Ls https://raw.githubusercontent.com/xy83953441-hue/3x-ui-limit/main/update.sh)
-    if [[ $? == 0 ]]; then
-        LOGI "更新完成，面板已重启"
-        before_show_menu
+    else
+        LOGE '更新未成功，请查看上方错误；需要时运行 x-ui diagnose。'
+        return 1
     fi
 }
 

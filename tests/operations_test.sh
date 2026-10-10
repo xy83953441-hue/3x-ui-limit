@@ -62,3 +62,17 @@ echo 'PASS: unsupported BBR returns without writes'
     ! update_menu
 )
 echo 'PASS: failed menu download cannot replace installed menu'
+
+(
+    source <(sed -n '/^run_remote_script() {$/,/^}$/p' x-ui.sh)
+    curl() { return 22; }
+    bash() { echo 'unexpected script execution'; exit 99; }
+    ! run_remote_script update
+)
+(
+    source <(sed -n '/^run_remote_script() {$/,/^}$/p' x-ui.sh)
+    curl() { return 0; }
+    bash() { echo 'unexpected empty script execution'; exit 99; }
+    ! run_remote_script update
+)
+echo 'PASS: failed or empty remote script downloads never execute'
